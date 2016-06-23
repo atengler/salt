@@ -11,6 +11,7 @@ import json
 import logging
 import random
 import string
+from distutils.version import StrictVersion
 
 # Import salt libs
 import salt.utils
@@ -307,17 +308,17 @@ def check_password(name, password, runas=None):
     '''
     # try to get the rabbitmq-version - adapted from _get_rabbitmq_plugin
     try:
-        version = [int(i) for i in __salt__['pkg.version']('rabbitmq-server').split('-')[0].split('.')]
+        version = __salt__['pkg.version']('rabbitmq-server').split('-')[0]
     except ValueError:
-        version = (0, 0, 0)
-    if len(version) < 3:
-        version = (0, 0, 0)
+        version = '0.0.0'
+    if len(version) < 5:
+        version = '0.0.0'
 
     if runas is None:
         runas = salt.utils.get_user()
 
     # rabbitmq introduced a native api to check a username and password in version 3.5.7.
-    if version[0] >= 3 and version[1] >= 5 and version[2] >= 7:
+    if StrictVersion(version) >= StrictVersion('3.5.7'):
         res = __salt__['cmd.run'](
             ['rabbitmqctl', 'authenticate_user', name, password],
             runas=runas,
