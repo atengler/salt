@@ -63,6 +63,9 @@ from __future__ import absolute_import
 # Import python libs
 import logging
 
+# Import salt libs
+import salt.utils.openstack.nova as suon
+
 
 # Get logging started
 log = logging.getLogger(__name__)
@@ -72,20 +75,16 @@ __func_alias__ = {
     'list_': 'list'
 }
 
-try:
-    import salt.utils.openstack.nova as suon
-    HAS_NOVA = True
-except NameError as exc:
-    HAS_NOVA = False
-
 
 def __virtual__():
     '''
     Only load this module if nova
     is installed on this minion.
     '''
-    return HAS_NOVA
-
+    if suon.check_nova():
+        return __virtualname__
+    return (False, 'The nova execution module failed to load: '
+            'only available if nova is installed.')
 
 __opts__ = {}
 
@@ -104,7 +103,7 @@ def _auth(profile=None):
         api_key = credentials.get('keystone.api_key', None)
         os_auth_system = credentials.get('keystone.os_auth_system', None)
         use_keystoneauth = credentials.get('keystone.use_keystoneauth', False)
-        verify = credentials.get('keystone.verify', None)
+        verify = credentials.get('keystone.verify', False)
     else:
         user = __salt__['config.option']('keystone.user')
         password = __salt__['config.option']('keystone.password')
@@ -113,34 +112,20 @@ def _auth(profile=None):
         region_name = __salt__['config.option']('keystone.region_name')
         api_key = __salt__['config.option']('keystone.api_key')
         os_auth_system = __salt__['config.option']('keystone.os_auth_system')
-        use_keystoneauth = __salt__['config.option']('keystone.use_keystoneauth')
-        verify = __salt__['config.option']('keystone.verify')
+        use_keystoneauth = __salt__['config.option']('keystone.use_keystoneauth', False)
+        verify = __salt__['config.option']('keystone.verify', True)
 
-    if use_keystoneauth is True:
-        project_domain_name = credentials['keystone.project_domain_name']
-        user_domain_name = credentials['keystone.user_domain_name']
-
-        kwargs = {
-            'username': user,
-            'password': password,
-            'project_id': tenant,
-            'auth_url': auth_url,
-            'region_name': region_name,
-            'use_keystoneauth': use_keystoneauth,
-            'verify': verify,
-            'project_domain_name': project_domain_name,
-            'user_domain_name': user_domain_name
-        }
-    else:
-        kwargs = {
-            'username': user,
-            'password': password,
-            'api_key': api_key,
-            'project_id': tenant,
-            'auth_url': auth_url,
-            'region_name': region_name,
-            'os_auth_plugin': os_auth_system
-        }
+    kwargs = {
+        'username': user,
+        'password': password,
+        'api_key': api_key,
+        'project_id': tenant,
+        'auth_url': auth_url,
+        'region_name': region_name,
+        'os_auth_plugin': os_auth_system,
+        'use_keystoneauth': use_keystoneauth,
+        'verify': verify
+    }
 
     return suon.SaltNova(**kwargs)
 
