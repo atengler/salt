@@ -18,11 +18,17 @@ try:
     from novaclient import client
     from novaclient.shell import OpenStackComputeShell
     import novaclient.utils
-    import novaclient.auth_plugin
     import novaclient.exceptions
     import novaclient.extension
     import novaclient.base
     HAS_NOVA = True
+except ImportError:
+    pass
+
+OCATA = True
+try:
+    import novaclient.auth_plugin
+    OCATA = False
 except ImportError:
     pass
 
@@ -45,7 +51,6 @@ log = logging.getLogger(__name__)
 
 # Version added to novaclient.client.Client function
 NOVACLIENT_MINVER = '2.6.1'
-NOVACLIENT_MAXVER = '6.0.1'
 
 # dict for block_device_mapping_v2
 CLIENT_BDM2_KEYS = {
@@ -66,12 +71,8 @@ def check_nova():
     if HAS_NOVA:
         novaclient_ver = _LooseVersion(novaclient.__version__)
         min_ver = _LooseVersion(NOVACLIENT_MINVER)
-        max_ver = _LooseVersion(NOVACLIENT_MAXVER)
-        if novaclient_ver >= min_ver and novaclient_ver <= max_ver:
+        if novaclient_ver >= min_ver:
             return HAS_NOVA
-        elif novaclient_ver > max_ver:
-            log.debug('Older novaclient version required. Maximum: {0}'.format(NOVACLIENT_MAXVER))
-            return False
         log.debug('Newer novaclient version required.  Minimum: {0}'.format(NOVACLIENT_MINVER))
     return False
 
@@ -154,17 +155,12 @@ class NovaServer(object):
 
         self.addresses = server.get('addresses', {})
         self.public_ips, self.private_ips = [], []
-        self.fixed_ips, self.floating_ips = [], []
         for network in self.addresses.values():
             for addr in network:
                 if salt.utils.cloud.is_public_ip(addr['addr']):
                     self.public_ips.append(addr['addr'])
                 else:
                     self.private_ips.append(addr['addr'])
-                if addr.get('OS-EXT-IPS:type') == 'floating':
-                    self.floating_ips.append(addr['addr'])
-                else:
-                    self.fixed_ips.append(addr['addr'])
 
         if password:
             self.extra['password'] = password
@@ -224,6 +220,7 @@ class SaltNova(object):
         password=None,
         os_auth_plugin=None,
         use_keystoneauth=False,
+        verify=True,
         **kwargs
     ):
         '''
@@ -236,6 +233,7 @@ class SaltNova(object):
                            region_name=region_name,
                            password=password,
                            os_auth_plugin=os_auth_plugin,
+                           verify=verify,
                            **kwargs)
         else:
             self._old_init(username=username,
@@ -244,6 +242,7 @@ class SaltNova(object):
                            region_name=region_name,
                            password=password,
                            os_auth_plugin=os_auth_plugin,
+                           verify=verify,
                            **kwargs)
 
     def _new_init(self, username, project_id, auth_url, region_name, password, os_auth_plugin, auth=None, verify=True, **kwargs):
@@ -289,10 +288,14 @@ class SaltNova(object):
         self.session = keystoneauth1.session.Session(auth=options, verify=verify)
         conn = client.Client(version=self.version, session=self.session, **self.client_kwargs)
         self.kwargs['auth_token'] = conn.client.session.get_token()
-        self.catalog = conn.client.session.get('/auth/catalog', endpoint_filter={'service_type': 'identity'}).json().get('catalog', [])
         if conn.client.get_endpoint(service_type='identity').endswith('v3'):
+            self.catalog = conn.client.session.get('/auth/catalog', endpoint_filter={'service_type': 'identity'}).json().get('catalog', [])
             self._v3_setup(region_name)
         else:
+            if OCATA:
+                msg = 'Method service_catalog is no longer present in python-novaclient >= 7.0.0'
+                raise Exception(msg)
+            self.catalog = conn.client.service_catalog.catalog['access']['serviceCatalog']
             self._v2_setup(region_name)
 
     def _old_init(self, username, project_id, auth_url, region_name, password, os_auth_plugin, **kwargs):
@@ -317,10 +320,14 @@ class SaltNova(object):
         self.kwargs['os_auth_url'] = auth_url
 
         if os_auth_plugin is not None:
-            novaclient.auth_plugin.discover_auth_systems()
-            auth_plugin = novaclient.auth_plugin.load_plugin(os_auth_plugin)
-            self.kwargs['auth_plugin'] = auth_plugin
-            self.kwargs['auth_system'] = os_auth_plugin
+            if OCATA:
+                msg = 'Module auth_plugin is no longer present in python-novaclient >= 7.0.0'
+                raise Exception(msg)
+            else:
+                novaclient.auth_plugin.discover_auth_systems()
+                auth_plugin = novaclient.auth_plugin.load_plugin(os_auth_plugin)
+                self.kwargs['auth_plugin'] = auth_plugin
+                self.kwargs['auth_system'] = os_auth_plugin
 
         if not self.kwargs.get('api_key', None):
             self.kwargs['api_key'] = password
@@ -347,6 +354,13 @@ class SaltNova(object):
             )
 
         self.kwargs['auth_token'] = conn.client.auth_token
+
+        # There is currently no way to get service catalog in the expected format with Ocata compatible
+        # python-novaclient in _old_init, because there is no session
+        if OCATA:
+            msg = 'Method service_catalog is no longer present in python-novaclient >= 7.0.0'
+            raise Exception(msg)
+
         self.catalog = conn.client.service_catalog.catalog['access']['serviceCatalog']
 
         self._v2_setup(region_name)
@@ -359,7 +373,10 @@ class SaltNova(object):
                 [('region', region_name), ('interface', 'public')]
             )['url']
 
-        self.compute_conn = client.Client(version=self.version, session=self.session, **self.client_kwargs)
+        if hasattr(self, 'session'):
+            self.compute_conn = client.Client(version=self.version, session=self.session, **self.client_kwargs)
+        else:
+            self.compute_conn = client.Client(**self.kwargs)
 
         volume_endpoints = get_entry(self.catalog, 'type', 'volume', raise_error=False).get('endpoints', {})
         if volume_endpoints:
@@ -384,7 +401,10 @@ class SaltNova(object):
                 region_name
             )['publicURL']
 
-        self.compute_conn = client.Client(**self.kwargs)
+        if hasattr(self, 'session'):
+            self.compute_conn = client.Client(version=self.version, session=self.session, **self.client_kwargs)
+        else:
+            self.compute_conn = client.Client(**self.kwargs)
 
         volume_endpoints = get_entry(self.catalog, 'type', 'volume', raise_error=False).get('endpoints', {})
         if volume_endpoints:
@@ -1150,14 +1170,7 @@ class SaltNova(object):
         floating_ips = nt_ks.floating_ips.list()
         for floating_ip in floating_ips:
             if floating_ip.ip == ip:
-                response = {
-                    'ip': floating_ip.ip,
-                    'fixed_ip': floating_ip.fixed_ip,
-                    'id': floating_ip.id,
-                    'instance_id': floating_ip.instance_id,
-                    'pool': floating_ip.pool
-                }
-                return response
+                return floating_ip
         return {}
 
     def floating_ip_create(self, pool=None):
